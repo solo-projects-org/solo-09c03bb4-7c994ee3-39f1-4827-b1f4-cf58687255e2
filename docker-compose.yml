@@ -1,0 +1,22 @@
+services:
+  # 生成样本日志数据(幂等: 已存在则跳过)
+  seed:
+    build: .
+    command: ["python", "scripts/make_sample_data.py", "--out", "/data/events.parquet", "--rows", "60000"]
+    volumes:
+      - ./data:/data
+
+  # 网页服务; Parquet 目录以只读方式挂载
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      EVENTS_PARQUET: /data/events.parquet
+      MAX_CONCURRENT_QUERIES: "2"   # 全站最多同时运行的查询数
+      QUERY_TIMEOUT_SECONDS: "10"   # 单条查询运行上限, 超时自动终止
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      seed:
+        condition: service_completed_successfully

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>检修日志筛错 SQL 试跑平台</title>
+<style>
+  :root { --bd:#d0d7de; --fg:#1f2328; --muted:#656d76; --bg:#f6f8fa; --accent:#0969da; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; color: var(--fg); background: #fff; }
+  header { background: var(--bg); border-bottom: 1px solid var(--bd); padding: 12px 20px;
+           display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; }
+  header .meta { font-size: 12.5px; color: var(--muted); }
+  main { padding: 16px 20px; max-width: 1200px; }
+  textarea { width: 100%; min-height: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+             font-size: 13.5px; line-height: 1.5; padding: 10px; border: 1px solid var(--bd);
+             border-radius: 6px; resize: vertical; tab-size: 2; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .bar { display: flex; gap: 8px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
+  button { font-size: 13.5px; padding: 6px 14px; border: 1px solid var(--bd); border-radius: 6px;
+           background: var(--bg); cursor: pointer; }
+  button.primary { background: #1f883d; border-color: #1f883d; color: #fff; }
+  button.danger  { background: #cf222e; border-color: #cf222e; color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .examples { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
+  .examples span { font-size: 12.5px; color: var(--muted); align-self: center; }
+  .examples button { font-size: 12.5px; padding: 3px 10px; border-radius: 999px; }
+  #status { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--bd); border-radius: 6px;
+            font-size: 13.5px; background: var(--bg); display: none; white-space: pre-wrap; }
+  #status.show { display: block; }
+  #status.running  { border-color: #bf8700; background: #fff8e6; }
+  #status.completed{ border-color: #1f883d; background: #e8f5e9; }
+  #status.failed   { border-color: #cf222e; background: #fdecea; }
+  #status.cancelled,#status.timeout { border-color: #656d76; background: #eef1f4; }
+  #status.busy     { border-color: #cf222e; background: #fdecea; }
+  .tablewrap { overflow: auto; border: 1px solid var(--bd); border-radius: 6px; margin-top: 8px; }
+  table { border-collapse: collapse; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  th, td { border: 1px solid var(--bd); padding: 4px 10px; text-align: left; white-space: nowrap; }
+  th { background: var(--bg); position: sticky; top: 0; }
+  .note { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .note.warn { color: #9a6700; font-weight: 600; }
+  footer { padding: 10px 20px 30px; font-size: 12.5px; color: var(--muted); }
+  code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>检修日志筛错 SQL 试跑平台</h1>
+  <span class="meta" id="meta">加载中…</span>
+</header>
+<main>
+  <div class="examples">
+    <span>示例:</span>
+    <button data-ex="combined">筛错(重号∨修复早于报障)</button>
+    <button data-ex="dup">重号检查</button>
+    <button data-ex="badorder">修复早于报障</button>
+    <button data-ex="big">大结果集(演示截断)</button>
+    <button data-ex="slow">慢查询(演示取消/10秒超时)</button>
+  </div>
+  <textarea id="sql" spellcheck="false"></textarea>
+  <div class="bar">
+    <button id="run" class="primary">▶ 运行</button>
+    <button id="cancel" class="danger" disabled>✖ 取消当前查询</button>
+    <span class="note">仅允许单条 SELECT / WITH;全站最多同时 2 条,超额直接提示繁忙;运行满 10 秒自动终止。</span>
+  </div>
+  <div id="status"></div>
+  <div id="result"></div>
+</main>
+<footer>
+  数据: 只读 Parquet 挂载为 <code>events</code> 表(<code>event_id</code>, <code>reported_at</code>, <code>restored_at</code>,UTC 秒)。
+  打开两个浏览器窗口即可验证:两个窗口各自查询互不影响,第三个并发请求会收到"繁忙"。
+</footer>
+<script>
+const EXAMPLES = {
+  combined:
+`-- 入仓前筛错: 重号 或 修复早于报障 的记录, 退回上游更正
+WITH checks AS (
+  SELECT event_id, reported_at, restored_at,
+         COUNT(*) OVER (PARTITION BY event_id) AS id_cnt
+  FROM events
+)
+SELECT event_id,
+       to_timestamp(reported_at) AS reported_at_utc,
+       to_timestamp(restored_at) AS restored_at_utc,
+       concat_ws('; ',
+                 CASE WHEN id_cnt > 1 THEN 'duplicate_event_id' END,
+                 CASE WHEN restored_at < reported_at THEN 'restored_before_reported' END
+       ) AS issues
+FROM checks
+WHERE id_cnt > 1 OR restored_at < reported_at
+ORDER BY event_id`,
+  dup:
+`-- 重号: 同一 event_id 出现多条
+SELECT event_id, COUNT(*) AS duplicate_count
+FROM events
+GROUP BY event_id
+HAVING COUNT(*) > 1
+ORDER BY duplicate_count DESC, event_id`,
+  badorder:
+`-- 修复时间早于报障时间
+SELECT event_id,
+       to_timestamp(reported_at) AS reported_at_utc,
+       to_timestamp(restored_at) AS restored_at_utc,
+       reported_at - restored_at AS skew_seconds
+FROM events
+WHERE restored_at < reported_at
+ORDER BY skew_seconds DESC`,
+  big:
+`-- 大结果集: 演示"仅显示前 200 行"截断提示
+SELECT event_id, reported_at, restored_at
+FROM events
+ORDER BY event_id, reported_at`,
+  slow:
+`-- 慢查询: 60k x 60k 笛卡尔积 + md5, 用于演示"取消"与"10 秒自动终止"
+SELECT sum(length(md5(CAST(a.event_id AS VARCHAR) || md5(CAST(b.event_id AS VARCHAR))))) AS checksum
+FROM events a CROSS JOIN events b`
+};
+
+const sqlEl = document.getElementById('sql');
+const runBtn = document.getElementById('run');
+const cancelBtn = document.getElementById('cancel');
+const statusEl = document.getElementById('status');
+const resultEl = document.getElementById('result');
+const metaEl = document.getElementById('meta');
+
+sqlEl.value = EXAMPLES.combined;
+document.querySelectorAll('.examples button').forEach(b =>
+  b.addEventListener('click', () => { sqlEl.value = EXAMPLES[b.dataset.ex]; sqlEl.focus(); }));
+
+let currentQueryId = null;
+let pollTimer = null;
+let tickTimer = null;
+let startedAtMs = null;
+
+function setStatus(kind, html) {
+  statusEl.className = 'show ' + kind;
+  statusEl.innerHTML = html;
+}
+function clearStatus() { statusEl.className = ''; statusEl.innerHTML = ''; }
+
+function fmtElapsed() {
+  return ((performance.now() - startedAtMs) / 1000).toFixed(1);
+}
+
+async function refreshMeta() {
+  try {
+    const h = await (await fetch('/api/health')).json();
+    metaEl.textContent =
+      `空闲名额 ${h.slots_available}/${h.max_concurrent} · 单条上限 ${h.timeout_seconds}s · 最多展示 ${h.max_rows} 行` +
+      (h.parquet_exists ? '' : ' · ⚠ 未找到 Parquet 数据文件');
+  } catch (e) { metaEl.textContent = '后端连接异常'; }
+}
+
+function setRunningUI(running) {
+  runBtn.disabled = running;
+  cancelBtn.disabled = !running;
+  if (running) {
+    startedAtMs = performance.now();
+    tickTimer = setInterval(() => {
+      const el = document.getElementById('elapsed');
+      if (el) el.textContent = fmtElapsed();
+    }, 100);
+  } else {
+    clearInterval(tickTimer); tickTimer = null;
+  }
+}
+
+async function runQuery() {
+  const sql = sqlEl.value;
+  clearStatus(); resultEl.innerHTML = '';
+  let res;
+  try {
+    res = await fetch('/api/queries', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sql})
+    });
+  } catch (e) { setStatus('failed', '网络错误: ' + e); return; }
+
+  if (res.status === 429) {
+    const d = await res.json();
+    setStatus('busy', '⚠ ' + d.detail);
+    refreshMeta();
+    return;
+  }
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    setStatus('failed', '✖ ' + (d.detail || ('HTTP ' + res.status)));
+    return;
+  }
+  const d = await res.json();
+  currentQueryId = d.query_id;
+  setRunningUI(true);
+  setStatus('running', `⏳ 查询运行中… 已用 <span id="elapsed">0.0</span>s / 上限 10s\nquery_id: ${currentQueryId}(可点击"取消当前查询")`);
+  poll();
+}
+
+async function poll() {
+  clearTimeout(pollTimer);
+  if (!currentQueryId) return;
+  let st;
+  try {
+    const res = await fetch('/api/queries/' + currentQueryId);
+    if (!res.ok) { setStatus('failed', '查询状态获取失败: HTTP ' + res.status); setRunningUI(false); return; }
+    st = await res.json();
+  } catch (e) { setStatus('failed', '网络错误: ' + e); setRunningUI(false); return; }
+
+  if (st.status === 'running') {
+    pollTimer = setTimeout(poll, 400);
+    return;
+  }
+  finish(st);
+}
+
+function finish(st) {
+  setRunningUI(false);
+  currentQueryId = null;
+  refreshMeta();
+  const secs = st.elapsed_seconds;
+  if (st.status === 'completed') {
+    setStatus('completed', `✔ 完成,用时 ${secs}s`);
+    renderResult(st);
+  } else if (st.status === 'failed') {
+    setStatus('failed', `✖ 执行出错(${secs}s)\n${st.error || ''}`);
+  } else if (st.status === 'cancelled') {
+    setStatus('cancelled', `■ 已取消(${secs}s)。后台计算已停止,名额已腾出,可立即再查。`);
+  } else if (st.status === 'timeout') {
+    setStatus('timeout', `■ 已超时自动终止(${secs}s)。后台计算已停止,名额已腾出,可立即再查。`);
+  }
+}
+
+async function cancelQuery() {
+  if (!currentQueryId) return;
+  cancelBtn.disabled = true;
+  setStatus('running', '⏳ 正在取消,等待后台计算停止…');
+  const id = currentQueryId;
+  try {
+    const res = await fetch(`/api/queries/${id}/cancel`, {method: 'POST'});
+    const st = await res.json();
+    clearTimeout(pollTimer);
+    if (id === currentQueryId) finish(st);   // 取消确认后才收尾
+  } catch (e) {
+    setStatus('failed', '取消请求失败: ' + e);
+    setRunningUI(false);
+    currentQueryId = null;
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderResult(st) {
+  if (!st.columns) { resultEl.innerHTML = ''; return; }
+  let html = '<div class="tablewrap"><table><thead><tr>' +
+    st.columns.map(c => `<th>${esc(c)}</th>`).join('') + '</tr></thead><tbody>';
+  for (const row of st.rows) {
+    html += '<tr>' + row.map(v => `<td>${v === null ? '<i>NULL</i>' : esc(v)}</td>`).join('') + '</tr>';
+  }
+  html += '</tbody></table></div>';
+  html += `<div class="note">列名: ${st.columns.map(esc).join(', ')}</div>`;
+  html += st.truncated
+    ? `<div class="note warn">结果超过 ${st.max_rows} 行,仅显示前 ${st.max_rows} 行。</div>`
+    : `<div class="note">共 ${st.row_count} 行。</div>`;
+  resultEl.innerHTML = html;
+}
+
+runBtn.addEventListener('click', runQuery);
+cancelBtn.addEventListener('click', cancelQuery);
+sqlEl.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !runBtn.disabled) runQuery();
+});
+refreshMeta();
+setInterval(refreshMeta, 3000);
+</script>
+</body>
+</html>
