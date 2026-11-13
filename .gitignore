@@ -1,4 +1,6 @@
 __pycache__/
 *.pyc
 data/*.parquet
+data/samples/
+data/appdata/
 !data/.gitkeep

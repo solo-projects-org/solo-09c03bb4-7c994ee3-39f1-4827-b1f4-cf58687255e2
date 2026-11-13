@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>检修日志筛错 SQL 试跑平台</title>
+<title>检修日志筛错与入仓放行平台</title>
 <style>
   :root { --bd:#d0d7de; --fg:#1f2328; --muted:#656d76; --bg:#f6f8fa; --accent:#0969da; }
   * { box-sizing: border-box; }
@@ -23,6 +23,7 @@
            background: var(--bg); cursor: pointer; }
   button.primary { background: #1f883d; border-color: #1f883d; color: #fff; }
   button.danger  { background: #cf222e; border-color: #cf222e; color: #fff; }
+  button.gold    { background: #bf8700; border-color: #bf8700; color: #fff; }
   button:disabled { opacity: .45; cursor: not-allowed; }
   .examples { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
   .examples span { font-size: 12.5px; color: var(--muted); align-self: center; }
@@ -31,10 +32,9 @@
             font-size: 13.5px; background: var(--bg); display: none; white-space: pre-wrap; }
   #status.show { display: block; }
   #status.running  { border-color: #bf8700; background: #fff8e6; }
-  #status.completed{ border-color: #1f883d; background: #e8f5e9; }
-  #status.failed   { border-color: #cf222e; background: #fdecea; }
+  #status.completed,#status.ok { border-color: #1f883d; background: #e8f5e9; }
+  #status.failed,#status.error,#status.busy { border-color: #cf222e; background: #fdecea; }
   #status.cancelled,#status.timeout { border-color: #656d76; background: #eef1f4; }
-  #status.busy     { border-color: #cf222e; background: #fdecea; }
   .tablewrap { overflow: auto; border: 1px solid var(--bd); border-radius: 6px; margin-top: 8px; }
   table { border-collapse: collapse; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
   th, td { border: 1px solid var(--bd); padding: 4px 10px; text-align: left; white-space: nowrap; }
@@ -43,34 +43,132 @@
   .note.warn { color: #9a6700; font-weight: 600; }
   footer { padding: 10px 20px 30px; font-size: 12.5px; color: var(--muted); }
   code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+  /* tabs */
+  nav.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--bd); margin-bottom: 16px; }
+  nav.tabs button { border-bottom: none; border-radius: 6px 6px 0 0; padding: 8px 18px;
+                    background: transparent; font-size: 14px; }
+  nav.tabs button.active { background: var(--bg); border-color: var(--bd); font-weight: 700;
+                           color: var(--accent); }
+  section.tab { display: none; }
+  section.tab.active { display: block; }
+  .card { border: 1px solid var(--bd); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 8px; }
+  .pill { display: inline-block; font-size: 12px; padding: 2px 9px; border-radius: 999px;
+          border: 1px solid var(--bd); }
+  .pill.uploaded { background: #eef1f4; }
+  .pill.checking { background: #fff8e6; border-color: #bf8700; color: #9a6700; }
+  .pill.ready    { background: #e8f5e9; border-color: #1f883d; color: #1a7f37; }
+  .pill.released { background: #ddf4ff; border-color: #0969da; color: #0969da; }
+  .pill.failed   { background: #fdecea; border-color: #cf222e; color: #cf222e; }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .rulebox { background: var(--bg); border: 1px solid var(--bd); border-radius: 6px;
+             padding: 10px; white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace;
+             font-size: 12.5px; max-height: 260px; overflow: auto; }
+  .batchrow td { vertical-align: top; }
+  .small { font-size: 12.5px; }
+  .filehint { font-size: 12.5px; color: var(--muted); margin: 4px 0 0; }
+  input[type=file] { font-size: 13.5px; }
+  .history td { white-space: normal; }
+  .kv { font-size: 12.5px; color: var(--muted); margin: 2px 0; }
+  .kv b { color: var(--fg); font-weight: 600; }
 </style>
 </head>
 <body>
 <header>
-  <h1>检修日志筛错 SQL 试跑平台</h1>
+  <h1>检修日志筛错与入仓放行平台</h1>
   <span class="meta" id="meta">加载中…</span>
 </header>
 <main>
-  <div class="examples">
-    <span>示例:</span>
-    <button data-ex="combined">筛错(重号∨修复早于报障)</button>
-    <button data-ex="dup">重号检查</button>
-    <button data-ex="badorder">修复早于报障</button>
-    <button data-ex="big">大结果集(演示截断)</button>
-    <button data-ex="slow">慢查询(演示取消/10秒超时)</button>
-  </div>
-  <textarea id="sql" spellcheck="false"></textarea>
-  <div class="bar">
-    <button id="run" class="primary">▶ 运行</button>
-    <button id="cancel" class="danger" disabled>✖ 取消当前查询</button>
-    <span class="note">仅允许单条 SELECT / WITH;全站最多同时 2 条,超额直接提示繁忙;运行满 10 秒自动终止。</span>
-  </div>
-  <div id="status"></div>
-  <div id="result"></div>
+  <nav class="tabs">
+    <button data-tab="trial" class="active">① SQL 试查(原试查)</button>
+    <button data-tab="rules">② 现行筛错规则</button>
+    <button data-tab="batches">③ 批次检查与放行</button>
+  </nav>
+
+  <!-- ============================ 试查 ============================ -->
+  <section class="tab active" id="tab-trial">
+    <div class="examples">
+      <span>示例:</span>
+      <button data-ex="combined">筛错(重号∨修复早于报障)</button>
+      <button data-ex="dup">重号检查</button>
+      <button data-ex="badorder">修复早于报障</button>
+      <button data-ex="big">大结果集(演示截断)</button>
+      <button data-ex="slow">慢查询(演示取消/10秒超时)</button>
+    </div>
+    <textarea id="sql" spellcheck="false"></textarea>
+    <div class="bar">
+      <button id="run" class="primary">▶ 运行</button>
+      <button id="cancel" class="danger" disabled>✖ 取消当前查询</button>
+      <span class="note">仅允许单条 SELECT / WITH;全站最多同时 2 条(与批次检查共用名额),超额直接提示繁忙;运行满 10 秒自动终止。</span>
+    </div>
+    <div id="status"></div>
+    <div id="result"></div>
+  </section>
+
+  <!-- ============================ 规则 ============================ -->
+  <section class="tab" id="tab-rules">
+    <div class="card">
+      <h2>现行筛错规则(一条 SELECT, 保存后对上传批次生效)</h2>
+      <div class="kv" id="ruleCurrentMeta">尚未加载</div>
+      <textarea id="ruleSql" spellcheck="false" style="min-height:200px"></textarea>
+      <div class="bar">
+        <button id="saveRule" class="primary">💾 保存为现行规则</button>
+        <button id="loadCurrent">把现行规则载入编辑框</button>
+        <span class="note warn">注意: 每次保存都产生新版本。检查期间仍可保存新规则; 若规则被改过——即使 SQL 改回原文——未放行批次也必须用新版本重新检查。</span>
+      </div>
+      <div id="ruleStatus"></div>
+    </div>
+    <div class="card">
+      <h2>规则保存历史(按生效次序)</h2>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>版本</th><th>rule_id</th><th>保存时间</th><th>SQL 摘要</th></tr></thead>
+          <tbody id="ruleHistory"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 批次 ============================ -->
+  <section class="tab" id="tab-batches">
+    <div class="card">
+      <h2>1. 上传批次 Parquet</h2>
+      <input type="file" id="batchFile" accept=".parquet">
+      <p class="filehint">
+        文件必须沿用 events 三列及类型:
+        <code>event_id VARCHAR</code>、<code>reported_at BIGINT</code>、
+        <code>restored_at BIGINT</code>(UTC 秒)。结构不符会被拒绝且不产生批次。
+        可先用 <code>docker compose</code> 样本卷里的
+        <code>samples/batch_before_correction.parquet</code>(更正前, 应拦截)和
+        <code>samples/batch_after_correction.parquet</code>(更正后, 可放行)试做。
+      </p>
+      <div class="bar">
+        <button id="uploadBtn" class="primary">⬆ 上传并建批</button>
+      </div>
+      <div id="uploadStatus"></div>
+    </div>
+
+    <div class="card">
+      <h2>2. 批次清单 / 检查 / 放行</h2>
+      <div class="bar">
+        <button id="refreshBatches">🔄 刷新清单</button>
+        <span class="note">检查与试查共用全站 2 个名额, 支持取消, 运行满 10 秒自动终止;
+          出错、查出错行、取消、超时均不放行。放行后可下载原文件并查看当时规则与结论快照。</span>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr>
+            <th>批号 / 原文件</th><th>状态</th><th>检查结论</th><th>操作</th><th>放行快照</th>
+          </tr></thead>
+          <tbody id="batchList"><tr><td colspan="5" class="note">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 </main>
 <footer>
   数据: 只读 Parquet 挂载为 <code>events</code> 表(<code>event_id</code>, <code>reported_at</code>, <code>restored_at</code>,UTC 秒)。
-  打开两个浏览器窗口即可验证:两个窗口各自查询互不影响,第三个并发请求会收到"繁忙"。
+  批次文件与放行记录存于数据卷 <code>/appdata</code>; 服务重启后未放行批次自动判定失败, 已放行批次仍可下载。
 </footer>
 <script>
 const EXAMPLES = {
@@ -118,6 +216,39 @@ SELECT sum(length(md5(CAST(a.event_id AS VARCHAR) || md5(CAST(b.event_id AS VARC
 FROM events a CROSS JOIN events b`
 };
 
+const STATUS_TEXT = {
+  uploaded: '待检查', checking: '检查中', ready: '零行通过·待放行',
+  released: '已放行', failed: '失败/不放行'
+};
+const INSP_TEXT = {
+  running: '运行中', completed: '完成', failed: '执行出错',
+  cancelled: '已取消', timeout: '超时终止'
+};
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtTime(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString('zh-CN', {hour12: false}) : '—';
+}
+function setStatus(el, kind, text) {
+  el.className = 'show ' + kind;
+  el.textContent = text;
+}
+function clearStatus(el) { el.className = ''; el.textContent = ''; }
+
+/* ---------------- 标签页 ---------------- */
+document.querySelectorAll('nav.tabs button').forEach(btn =>
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('section.tab').forEach(s =>
+      s.classList.toggle('active', s.id === 'tab-' + btn.dataset.tab));
+    if (btn.dataset.tab === 'rules') loadRules();
+    if (btn.dataset.tab === 'batches') loadBatches();
+  }));
+
+/* ---------------- 试查(原功能) ---------------- */
 const sqlEl = document.getElementById('sql');
 const runBtn = document.getElementById('run');
 const cancelBtn = document.getElementById('cancel');
@@ -134,22 +265,14 @@ let pollTimer = null;
 let tickTimer = null;
 let startedAtMs = null;
 
-function setStatus(kind, html) {
-  statusEl.className = 'show ' + kind;
-  statusEl.innerHTML = html;
-}
-function clearStatus() { statusEl.className = ''; statusEl.innerHTML = ''; }
-
-function fmtElapsed() {
-  return ((performance.now() - startedAtMs) / 1000).toFixed(1);
-}
+function fmtElapsed() { return ((performance.now() - startedAtMs) / 1000).toFixed(1); }
 
 async function refreshMeta() {
   try {
     const h = await (await fetch('/api/health')).json();
     metaEl.textContent =
-      `空闲名额 ${h.slots_available}/${h.max_concurrent} · 单条上限 ${h.timeout_seconds}s · 最多展示 ${h.max_rows} 行` +
-      (h.parquet_exists ? '' : ' · ⚠ 未找到 Parquet 数据文件');
+      `空闲名额 ${h.slots_available}/${h.max_concurrent}(试查+检查共用) · 单条上限 ${h.timeout_seconds}s · 最多展示 ${h.max_rows} 行` +
+      (h.parquet_exists ? '' : ' · ⚠ 未找到试查 Parquet 数据文件');
   } catch (e) { metaEl.textContent = '后端连接异常'; }
 }
 
@@ -168,31 +291,31 @@ function setRunningUI(running) {
 }
 
 async function runQuery() {
-  const sql = sqlEl.value;
-  clearStatus(); resultEl.innerHTML = '';
+  clearStatus(statusEl); resultEl.innerHTML = '';
   let res;
   try {
     res = await fetch('/api/queries', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({sql})
+      body: JSON.stringify({sql: sqlEl.value})
     });
-  } catch (e) { setStatus('failed', '网络错误: ' + e); return; }
+  } catch (e) { setStatus(statusEl, 'failed', '网络错误: ' + e); return; }
 
   if (res.status === 429) {
     const d = await res.json();
-    setStatus('busy', '⚠ ' + d.detail);
+    setStatus(statusEl, 'busy', '⚠ ' + d.detail);
     refreshMeta();
     return;
   }
   if (!res.ok) {
     const d = await res.json().catch(() => ({}));
-    setStatus('failed', '✖ ' + (d.detail || ('HTTP ' + res.status)));
+    setStatus(statusEl, 'failed', '✖ ' + (d.detail || ('HTTP ' + res.status)));
     return;
   }
   const d = await res.json();
   currentQueryId = d.query_id;
   setRunningUI(true);
-  setStatus('running', `⏳ 查询运行中… 已用 <span id="elapsed">0.0</span>s / 上限 10s\nquery_id: ${currentQueryId}(可点击"取消当前查询")`);
+  setStatus(statusEl, 'running',
+    `⏳ 查询运行中… 已用 <span id="elapsed">0.0</span>s / 上限 10s\nquery_id: ${currentQueryId}(可点击"取消当前查询")`);
   poll();
 }
 
@@ -202,14 +325,11 @@ async function poll() {
   let st;
   try {
     const res = await fetch('/api/queries/' + currentQueryId);
-    if (!res.ok) { setStatus('failed', '查询状态获取失败: HTTP ' + res.status); setRunningUI(false); return; }
+    if (!res.ok) { setStatus(statusEl, 'failed', '查询状态获取失败: HTTP ' + res.status); setRunningUI(false); return; }
     st = await res.json();
-  } catch (e) { setStatus('failed', '网络错误: ' + e); setRunningUI(false); return; }
+  } catch (e) { setStatus(statusEl, 'failed', '网络错误: ' + e); setRunningUI(false); return; }
 
-  if (st.status === 'running') {
-    pollTimer = setTimeout(poll, 400);
-    return;
-  }
+  if (st.status === 'running') { pollTimer = setTimeout(poll, 400); return; }
   finish(st);
 }
 
@@ -219,37 +339,32 @@ function finish(st) {
   refreshMeta();
   const secs = st.elapsed_seconds;
   if (st.status === 'completed') {
-    setStatus('completed', `✔ 完成,用时 ${secs}s`);
+    setStatus(statusEl, 'completed', `✔ 完成,用时 ${secs}s`);
     renderResult(st);
   } else if (st.status === 'failed') {
-    setStatus('failed', `✖ 执行出错(${secs}s)\n${st.error || ''}`);
+    setStatus(statusEl, 'failed', `✖ 执行出错(${secs}s)\n${st.error || ''}`);
   } else if (st.status === 'cancelled') {
-    setStatus('cancelled', `■ 已取消(${secs}s)。后台计算已停止,名额已腾出,可立即再查。`);
+    setStatus(statusEl, 'cancelled', `■ 已取消(${secs}s)。后台计算已停止,名额已腾出,可立即再查。`);
   } else if (st.status === 'timeout') {
-    setStatus('timeout', `■ 已超时自动终止(${secs}s)。后台计算已停止,名额已腾出,可立即再查。`);
+    setStatus(statusEl, 'timeout', `■ 已超时自动终止(${secs}s)。后台计算已停止,名额已腾出,可立即再查。`);
   }
 }
 
 async function cancelQuery() {
   if (!currentQueryId) return;
   cancelBtn.disabled = true;
-  setStatus('running', '⏳ 正在取消,等待后台计算停止…');
+  setStatus(statusEl, 'running', '⏳ 正在取消,等待后台计算停止…');
   const id = currentQueryId;
   try {
     const res = await fetch(`/api/queries/${id}/cancel`, {method: 'POST'});
     const st = await res.json();
     clearTimeout(pollTimer);
-    if (id === currentQueryId) finish(st);   // 取消确认后才收尾
+    if (id === currentQueryId) finish(st);
   } catch (e) {
-    setStatus('failed', '取消请求失败: ' + e);
+    setStatus(statusEl, 'failed', '取消请求失败: ' + e);
     setRunningUI(false);
     currentQueryId = null;
   }
-}
-
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function renderResult(st) {
@@ -272,6 +387,167 @@ cancelBtn.addEventListener('click', cancelQuery);
 sqlEl.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !runBtn.disabled) runQuery();
 });
+
+/* ---------------- 规则 ---------------- */
+const ruleSqlEl = document.getElementById('ruleSql');
+const ruleMetaEl = document.getElementById('ruleCurrentMeta');
+const ruleStatusEl = document.getElementById('ruleStatus');
+const ruleHistoryEl = document.getElementById('ruleHistory');
+let currentRuleId = null;
+
+async function loadRules() {
+  const d = await (await fetch('/api/rules')).json();
+  const cur = d.current;
+  if (cur) {
+    currentRuleId = cur.rule_id;
+    ruleMetaEl.innerHTML =
+      `现行规则: <b>v${cur.version}</b> · rule_id <code>${esc(cur.rule_id)}</code> · 保存于 ${fmtTime(cur.saved_at)}`;
+    if (!ruleSqlEl.value.trim()) ruleSqlEl.value = cur.sql;
+  } else {
+    currentRuleId = null;
+    ruleMetaEl.textContent = '尚无规则';
+  }
+  ruleHistoryEl.innerHTML = (d.history || []).slice().reverse().map(r => `
+    <tr class="history">
+      <td>v${r.version}${r.rule_id === currentRuleId ? ' ★现行' : ''}</td>
+      <td class="mono">${esc(r.rule_id)}</td>
+      <td>${fmtTime(r.saved_at)}</td>
+      <td class="mono">${esc(r.sql.slice(0, 120).replace(/\s+/g, ' '))}…</td>
+    </tr>`).join('') || '<tr><td colspan="4" class="note">暂无历史</td></tr>';
+}
+
+document.getElementById('loadCurrent').addEventListener('click', async () => {
+  const d = await (await fetch('/api/rules')).json();
+  if (d.current) { ruleSqlEl.value = d.current.sql; setStatus(ruleStatusEl, 'ok', '已载入现行规则 SQL。'); }
+});
+document.getElementById('saveRule').addEventListener('click', async () => {
+  let res;
+  try {
+    res = await fetch('/api/rules/current', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sql: ruleSqlEl.value})
+    });
+  } catch (e) { setStatus(ruleStatusEl, 'failed', '网络错误: ' + e); return; }
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) { setStatus(ruleStatusEl, 'failed', '✖ ' + (d.detail || ('HTTP ' + res.status))); return; }
+  currentRuleId = d.rule_id;
+  setStatus(ruleStatusEl, 'ok',
+    `✔ 已保存为新现行规则 v${d.version}(rule_id ${d.rule_id})。此前已检查未放行的批次需重新检查才可放行。`);
+  loadRules();
+  refreshMeta();
+});
+
+/* ---------------- 批次 ---------------- */
+const batchListEl = document.getElementById('batchList');
+const uploadStatusEl = document.getElementById('uploadStatus');
+let batchPollTimer = null;
+
+document.getElementById('uploadBtn').addEventListener('click', async () => {
+  const f = document.getElementById('batchFile').files[0];
+  if (!f) { setStatus(uploadStatusEl, 'failed', '请先选择一个 .parquet 文件。'); return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  setStatus(uploadStatusEl, 'running', '⏳ 上传中…');
+  let res;
+  try {
+    res = await fetch('/api/batches', {method: 'POST', body: fd});
+  } catch (e) { setStatus(uploadStatusEl, 'failed', '网络错误: ' + e); return; }
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) { setStatus(uploadStatusEl, 'failed', '✖ ' + (d.detail || ('HTTP ' + res.status))); return; }
+  setStatus(uploadStatusEl, 'ok', `✔ 已建批 ${d.batch_id}(原文件: ${esc(d.original_filename)}), 可在下方发起检查。`);
+  loadBatches();
+});
+document.getElementById('refreshBatches').addEventListener('click', loadBatches);
+
+function inspSummary(b) {
+  const i = b.inspection;
+  if (!i) return '<span class="note">未检查</span>';
+  let txt = `${INSP_TEXT[i.status] || i.status}`;
+  if (i.status === 'completed')
+    txt += i.row_count === 0 ? ' · 零行通过 ✅' : ` · 命中 ${i.row_count}${b.status === 'failed' ? ' 行错行 ❌' : ' 行'}`;
+  if (i.elapsed_seconds != null) txt += ` · ${i.elapsed_seconds}s`;
+  if (i.error) txt += ` · ${esc(i.error)}`;
+  txt += ` <div class="kv">规则 v${i.rule_version} <code>${esc(i.rule_id)}</code></div>`;
+  if (b.failure_reason) txt += `<div class="kv" style="color:#cf222e">${esc(b.failure_reason)}</div>`;
+  return txt;
+}
+
+function actionButtons(b) {
+  const btns = [];
+  if (b.status === 'uploaded' || b.status === 'failed')
+    btns.push(`<button class="primary" data-act="inspect" data-id="${b.batch_id}">🔍 发起检查</button>`);
+  if (b.status === 'checking')
+    btns.push(`<button class="danger" data-act="cancel" data-id="${b.batch_id}">✖ 取消检查</button>`);
+  if (b.status === 'ready')
+    btns.push(`<button class="gold" data-act="release" data-id="${b.batch_id}" data-rule="${esc(b.inspection.rule_id)}">✅ 放行本批</button>`);
+  if (b.status === 'released')
+    btns.push(`<a href="/api/batches/${b.batch_id}/download"><button>⬇ 下载原文件</button></a>`);
+  return btns.join(' ') || '<span class="note">—</span>';
+}
+
+function releaseSnapshot(b) {
+  const r = b.release;
+  if (!r) return '<span class="note">—</span>';
+  return `<div class="kv">放行于 <b>${fmtTime(r.released_at)}</b></div>
+    <div class="kv">规则 v${r.rule_version} <code>${esc(r.rule_id)}</code></div>
+    <details><summary class="note">当时规则与结论</summary>
+      <div class="rulebox" style="max-height:160px">${esc(r.rule_sql)}</div>
+      <div class="kv">结论: ${esc(r.conclusion.status)} · 命中 ${r.conclusion.row_count} 行 · ${r.conclusion.elapsed_seconds}s</div>
+    </details>`;
+}
+
+async function loadBatches() {
+  const d = await (await fetch('/api/batches')).json();
+  const batches = d.batches || [];
+  if (!batches.length) {
+    batchListEl.innerHTML = '<tr><td colspan="5" class="note">还没有批次, 先在上方上传 Parquet。</td></tr>';
+    return;
+  }
+  batchListEl.innerHTML = batches.map(b => `
+    <tr class="batchrow">
+      <td><div class="mono">${esc(b.batch_id)}</div>
+          <div class="kv">${esc(b.original_filename)} · ${b.size_bytes} B</div>
+          <div class="kv">建批 ${fmtTime(b.created_at)}</div></td>
+      <td><span class="pill ${b.status}">${STATUS_TEXT[b.status] || b.status}</span></td>
+      <td class="small">${inspSummary(b)}</td>
+      <td>${actionButtons(b)}</td>
+      <td class="small">${releaseSnapshot(b)}</td>
+    </tr>`).join('');
+  if (batches.some(b => b.status === 'checking')) {
+    clearTimeout(batchPollTimer);
+    batchPollTimer = setTimeout(loadBatches, 1000);
+  }
+}
+
+batchListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = btn.dataset.act;
+  const bid = btn.dataset.id;
+  if (id === 'inspect') {
+    const res = await fetch(`/api/batches/${bid}/inspections`, {method: 'POST'});
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(d.detail || ('HTTP ' + res.status)); }
+    loadBatches(); refreshMeta();
+  } else if (id === 'cancel') {
+    btn.disabled = true;
+    const res = await fetch(`/api/batches/${bid}/inspections/cancel`, {method: 'POST'});
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(d.detail || ('HTTP ' + res.status)); }
+    loadBatches(); refreshMeta();
+  } else if (id === 'release') {
+    const res = await fetch(`/api/batches/${bid}/release`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rule_id: btn.dataset.rule})
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert('✖ 拒绝放行: ' + (d.detail || ('HTTP ' + res.status)) + '\n请按现行规则重新检查后再放行。');
+    }
+    loadBatches();
+  }
+});
+
 refreshMeta();
 setInterval(refreshMeta, 3000);
 </script>

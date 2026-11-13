@@ -1,22 +1,33 @@
 services:
-  # 生成样本日志数据(幂等: 已存在则跳过)
+  # 生成样本数据(幂等: 已存在则跳过)
   seed:
     build: .
-    command: ["python", "scripts/make_sample_data.py", "--out", "/data/events.parquet", "--rows", "60000"]
+    command:
+      - bash
+      - -c
+      - |
+        python scripts/make_sample_data.py --out /data/events.parquet --rows 60000
+        python scripts/make_sample_data.py --make-batch-pair /data/samples --rows 5000
     volumes:
-      - ./data:/data
+      - sample-data:/data
 
-  # 网页服务; Parquet 目录以只读方式挂载
+  # 网页服务; 样本目录只读, 应用数据目录(批次文件/放行记录)可写并持久化
   web:
     build: .
     ports:
       - "8000:8000"
     environment:
       EVENTS_PARQUET: /data/events.parquet
-      MAX_CONCURRENT_QUERIES: "2"   # 全站最多同时运行的查询数
+      APP_DATA_DIR: /appdata
+      MAX_CONCURRENT_QUERIES: "2"   # 全站最多同时运行的查询数(试查+批次检查共用)
       QUERY_TIMEOUT_SECONDS: "10"   # 单条查询运行上限, 超时自动终止
     volumes:
-      - ./data:/data:ro
+      - sample-data:/data:ro
+      - app-data:/appdata
     depends_on:
       seed:
         condition: service_completed_successfully
+
+volumes:
+  sample-data:   # 样本 Parquet(试查数据 + 更正前/后批次样例)
+  app-data:      # 上传批次文件、规则与放行记录(数据卷, 重启不丢)

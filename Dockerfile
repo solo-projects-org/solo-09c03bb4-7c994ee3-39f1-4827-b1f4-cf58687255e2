@@ -9,6 +9,7 @@ COPY app ./app
 COPY scripts ./scripts
 
 ENV EVENTS_PARQUET=/data/events.parquet \
+    APP_DATA_DIR=/appdata \
     MAX_CONCURRENT_QUERIES=2 \
     QUERY_TIMEOUT_SECONDS=10
 
